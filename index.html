@@ -184,8 +184,8 @@ const CONFIG = {
      global leaderboard and the hidden ending check. leave the
      placeholders and the game still runs fully, offline,
      with a local personal best only. */
-  SUPABASE_URL: "YOUR_SUPABASE_URL",
-  SUPABASE_ANON_KEY: "YOUR_SUPABASE_ANON_KEY",
+  SUPABASE_URL: "https://tiusyzcmhvqwvvrsiyjl.supabase.co",
+  SUPABASE_ANON_KEY: "sb_publishable_bue4Dr-8sOvOu3e-uNQ-mg__TNstQcX",
 
   /* start asking the server whether the end has been reached
      only once a run is this old. keeps early play fully local
@@ -196,21 +196,25 @@ const CONFIG = {
 /* ---- balance constants (moisture runs 0..100, ideal 50) ---- */
 const B = {
   DRY_RATE: 1.0,        // moisture lost per second while closed
-  WATER_BASE: 15,       // seconds of ideal interval on day 0
-  WATER_GROWTH: 0.03,   // ideal interval grows as the plant ages
-  WATER_MAX: 40,        // cap so counts stay humanly countable
+  WATER_BASE: 14,       // seconds of ideal interval on day 0
+  WATER_GROWTH: 0.04,   // ideal interval grows as the plant ages
+  WATER_MAX: 26,        // cap so late counts stay quick, not tedious
   TARGET_MIN: 4,        // never ask for less than this many seconds
 
-  OPT_START: 2.2,       // half width of the safe band on day 0
-  OPT_FLOOR: 0.28,      // safe band shrinks toward the timing noise floor
-  OPT_TAU: 200,         // higher = safe band shrinks slower
+  OPT_START: 1.8,       // half width of the safe band on day 0
+  OPT_FLOOR: 0.33,      // safe band shrinks toward the timing noise floor
+  OPT_TAU: 60,          // higher = safe band shrinks slower (lower = harder faster)
 
-  HEAL_START: 0.85,     // half width of the healing band on day 0
-  HEAL_END_DAY: 120,    // healing disappears entirely at this day
+  HEAL_START: 0.65,     // half width of the healing band on day 0
+  HEAL_END_DAY: 32,     // healing disappears entirely at this day
 
-  DAMAGE_K: 1.7,        // damage scale for a watering outside the safe band
+  DAMAGE_K: 3.0,        // damage scale for a watering outside the safe band
   DAMAGE_P: 1.7,        // superlinear: near-misses sting, big misses can gut you
-  HEAL_AMOUNT: 1.6,     // health regained on a healing-band watering
+  HEAL_AMOUNT: 0.9,     // health regained on a healing-band watering
+
+  DECAY_FREE: 16,       // no aging drain for this many days (beginners judged purely on timing)
+  DECAY_RATE: 0.05,     // after that, the plant frails a little more each day, capping long runs
+
   MIN_CLOSE: 0.8        // opens quicker than this count as a misfire
 };
 
@@ -219,6 +223,7 @@ const B = {
 function waterAmount(day){ return Math.min(B.WATER_MAX, B.WATER_BASE + B.WATER_GROWTH*day); }
 function optimalHalf(day){ return B.OPT_FLOOR + (B.OPT_START-B.OPT_FLOOR)*Math.exp(-day/B.OPT_TAU); }
 function healingHalf(day){ return Math.max(0, B.HEAL_START*(1 - day/B.HEAL_END_DAY)); }
+function agingDrain(day){ return Math.max(0, (day - B.DECAY_FREE) * B.DECAY_RATE); }
 function targetSeconds(moisture,day){
   return Math.max(B.TARGET_MIN, (moisture - 50 + waterAmount(day)) / B.DRY_RATE);
 }
@@ -277,11 +282,11 @@ const PLANT_NAMES = ["Basil","Fern","Pip","Clover","Moss","Sage","Reed","Bud","T
    the plant  (kawaii, reactive by mood + growth stage)
    ============================================================ */
 const POT_BOTTOM_Y = 288;
-const REPOT_DAYS = [3, 10, 28, 70, 160];   // days the plant is moved up to a bigger pot
-const BLOOM_DAY = 35;                       // the first flower opens (its own moment)
+const REPOT_DAYS = [3, 9, 20, 40, 65];   // days the plant is moved up to a bigger pot
+const BLOOM_DAY = 30;                       // the first flower opens (its own moment)
 function potTier(day){ let t=0; for(const d of REPOT_DAYS){ if(day>=d) t++; } return t; }   // 0..5
 function stemHeight(day){ return 26 + 116*(1-Math.exp(-day/45)); }   // starts tiny, shoots up early, eases toward ~140
-function leafPairs(day){ const th=[1,4,9,20,45,100]; let n=0; for(const t of th){ if(day>=t) n++; } return Math.min(n,6); }
+function leafPairs(day){ const th=[1,3,7,14,28,50]; let n=0; for(const t of th){ if(day>=t) n++; } return Math.min(n,6); }
 function potGeom(tier){
   const topHalf=42+tier*6.5, height=90+tier*7;
   return {cx:115, topHalf, botHalf:topHalf*0.76, height, rimY:POT_BOTTOM_Y-height, botY:POT_BOTTOM_Y};
@@ -642,7 +647,8 @@ function resolveRound(elapsed){
     if(dev>0){ verdict='Overwatered'; vclass='v-over'; S.lastCause='over'; blip(300,.18,'triangle'); }
     else{ verdict='Too dry'; vclass='v-dry'; S.lastCause='dry'; blip(260,.18,'sawtooth'); }
   }
-  S.health=Math.max(0,Math.min(100,S.health+delta));
+  const aging = agingDrain(S.day);
+  S.health=Math.max(0,Math.min(100,S.health+delta-aging));
   S.day++;
   const nt=potTier(S.day);
   if(nt>S.tier){ S.pendingRepot=nt; }   // grew past its pot; actual move happens on the repot screen
@@ -655,14 +661,15 @@ function resolveRound(elapsed){
   const recap=`You opened at <strong>${t.toFixed(1)}s</strong>, and the mark was <strong>${tstar.toFixed(1)}s</strong>.`;
   let line;
   if(vclass==='v-heal'){
-    line=`${recap} Just about perfect, so ${p} perked right up. Health <strong>+${delta.toFixed(1)}</strong>.`;
+    line=`${recap} Just about perfect, so ${p} perked up. Health <strong>+${delta.toFixed(1)}</strong>.`;
   } else if(vclass==='v-safe'){
-    line=`${recap} Close enough that ${p} is fine. No health lost.`;
+    line=`${recap} Close enough that your timing did ${p} no harm.`;
   } else if(vclass==='v-over'){
     line=`${recap} Opening ${diff}s early meant watering ${p} again too soon, so the soil is now waterlogged. Health <strong>${delta.toFixed(1)}</strong>. Wait a little longer next round.`;
   } else {
     line=`${recap} Opening ${diff}s late left ${p} thirsty for too long. Health <strong>${delta.toFixed(1)}</strong>. Open a little sooner next round.`;
   }
+  if(aging>0.05){ line+=` <span style="opacity:.65">Age took another <strong>${aging.toFixed(1)}</strong>: older plants frail no matter how well you time them.</span>`; }
   show(`
     <div class="verdict ${vclass}">${verdict}</div>
     <p>${line}</p>
