@@ -124,6 +124,18 @@
   .lb-row .rank{font-family:'Fredoka';font-weight:600;color:var(--ink-soft);width:26px}
   .lb-row .nm{flex:1;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .lb-row .dy{font-family:'Fredoka';font-weight:600;color:var(--sun-dark)}
+  .lb-row{align-items:center}
+  .lb-head{display:flex;justify-content:space-between;padding:0 12px 6px;font-size:11px;
+    font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--ink-soft);opacity:.65}
+  .lb-row .dy .u{font-family:'Nunito';font-size:11px;font-weight:700;opacity:.75;margin-left:3px}
+  .lb-row.me{background:#fff5df;box-shadow:inset 0 0 0 2px var(--sun)}
+  .lb-row.me .rank,.lb-row.me .dy{color:var(--sun-dark)}
+  .lb-anim{position:relative;margin-top:2px}
+  .lb-anim .lb-row,.lb-anim .lb-row:nth-child(odd){position:absolute;left:0;right:0;height:40px;
+    background:var(--card-soft);transition:top .8s cubic-bezier(.22,1,.36,1)}
+  .lb-anim .lb-row.me{background:#fff5df;z-index:3}
+  .youline{transition:opacity .6s ease}
+  .rank-banner{font-family:'Fredoka';font-weight:600;color:var(--sun-dark);font-size:16px;margin:8px 0 4px}
   .note{font-size:12px;color:var(--ink-soft);margin-top:10px;line-height:1.4}
 
   .foot{margin-top:12px;display:flex;gap:14px;justify-content:center;align-items:center}
@@ -432,14 +444,28 @@ function initSB(){
   try{ sb = window.supabase.createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_ANON_KEY); }catch(e){ sb=null; }
 }
 async function submitScore(name,days,avgErr,cause){
-  if(!sb) return;
-  try{ await sb.from('scores').insert({name:name.slice(0,24),days,avg_error:+avgErr.toFixed(2),cause}); }catch(e){}
+  if(!sb) return null;
+  try{
+    const {data,error}=await sb.from('scores')
+      .insert({name:name.slice(0,24),days,avg_error:+avgErr.toFixed(2),cause})
+      .select('id').single();
+    if(error) return null; return data ? data.id : null;
+  }catch(e){ return null; }
 }
 async function fetchScores(){
   if(!sb) return null;
   try{
-    const {data,error}=await sb.from('scores').select('name,days').order('days',{ascending:false}).limit(15);
+    const {data,error}=await sb.from('scores').select('id,name,days')
+      .order('days',{ascending:false}).order('created_at',{ascending:true}).limit(20);
     if(error) return null; return data;
+  }catch(e){ return null; }
+}
+async function rankAmong(days){
+  if(!sb) return null;
+  try{
+    const hi =await sb.from('scores').select('id',{count:'exact',head:true}).gt('days',days);
+    const tot=await sb.from('scores').select('id',{count:'exact',head:true});
+    return {rank:(hi.count||0)+1, total:(tot.count||0)};
   }catch(e){ return null; }
 }
 async function checkEnding(days){
@@ -707,18 +733,100 @@ async function death(){
   saveBest(days);
   updateMeters();
   const msg=pickMessage();
-  const tendency = S.earlyCount>S.lateCount?'you leaned toward opening early':'you leaned toward opening late';
+  // show the message right away, then talk to the leaderboard
   show(`
     <h2>${S.plant} has died</h2>
     <div class="death-msg">${msg}</div>
-    <div class="stat-line">Lived <strong>${days} days</strong></div>
-    <div class="stat-line">Average timing error: <strong>${avg.toFixed(1)}s</strong> · ${tendency}</div>
-    <button class="wide" id="againBtn">Plant a new seed</button>
-    <a class="note" id="viewLb" style="display:inline-block;margin-top:12px;cursor:pointer;font-weight:700;color:var(--ink-soft)">See the leaderboard</a>
+    <div class="stat-line">Lived <strong>${daysLabel(days)}</strong> · avg timing error <strong>${avg.toFixed(1)}s</strong></div>
+    <p class="hint" id="lbLoading">Checking the leaderboard...</p>
+    <button class="wide" id="againBtn" style="margin-top:8px">Plant a new seed</button>
   `);
   document.getElementById('againBtn').onclick=()=>startRun();
-  document.getElementById('viewLb').onclick=()=>screenLeaderboard();
-  submitScore(S.name,days,avg,S.lastCause);
+
+  const id = await submitScore(S.name,days,avg,S.lastCause);
+  const board = await fetchScores();
+  const rc = board ? await rankAmong(days) : null;
+  renderDeathBoard(msg,days,avg,id,board,rc);
+}
+
+function renderDeathBoard(msg,days,avg,id,board,rc){
+  const ROW=46, N=8;
+  // no global board (offline / paused / not configured): message + local best
+  if(!board || !board.length){
+    const b=bestLocal();
+    show(`
+      <h2>${S.plant} has died</h2>
+      <div class="death-msg">${msg}</div>
+      <div class="stat-line">Lived <strong>${daysLabel(days)}</strong> · avg timing error <strong>${avg.toFixed(1)}s</strong></div>
+      ${b?`<div class="stat-line">Your longest life: <strong>${daysLabel(b.days)}</strong></div>`:''}
+      <div class="note">${HAS_SB?'The global leaderboard is asleep right now, so this score was not saved. It wakes once the game gets a little traffic.':'Connect Supabase to turn on the global leaderboard.'}</div>
+      <button class="wide" id="againBtn" style="margin-top:10px">Plant a new seed</button>
+    `);
+    document.getElementById('againBtn').onclick=()=>startRun();
+    return;
+  }
+
+  const top=board.slice(0,N);
+  let meIdx = id!=null ? board.findIndex(r=>r.id===id) : -1;
+  if(meIdx<0) meIdx = board.findIndex(r=>r.name===S.name && r.days===days);
+  const meInTop = meIdx>=0 && meIdx<top.length;
+  const rank = rc?rc.rank:(meIdx>=0?meIdx+1:null);
+  const total = rc?rc.total:null;
+  const topRank = rank===1;
+
+  const rowsHtml = top.map((r,i)=>{
+    const me = meInTop && i===meIdx;
+    const before = !meInTop ? i*ROW
+                 : (i===meIdx ? (top.length-1)*ROW : (i>meIdx ? (i-1)*ROW : i*ROW));
+    return `<div class="lb-row${me?' me':''}" data-after="${i*ROW}" style="top:${before}px">
+      <span class="rank">${i+1}</span><span class="nm">${escapeHtml(r.name)}</span>
+      <span class="dy">${daysLabel(r.days)}</span></div>`;
+  }).join('');
+
+  const youLine = (!meInTop && rank) ? `<div class="lb-row me youline" style="opacity:0;margin-top:6px">
+      <span class="rank">${rank}</span><span class="nm">${escapeHtml(S.name)} (you)</span>
+      <span class="dy">${daysLabel(days)}</span></div>` : '';
+
+  const banner = topRank
+    ? `<div class="rank-banner">New number one. Nobody has kept one alive longer.</div>`
+    : (rank ? `<div class="rank-banner">You reached #${rank}${total?` of ${total}`:''}.</div>` : '');
+
+  show(`
+    <h2>${S.plant} has died</h2>
+    <div class="death-msg">${msg}</div>
+    <div class="stat-line">Lived <strong>${daysLabel(days)}</strong> · avg timing error <strong>${avg.toFixed(1)}s</strong></div>
+    ${banner}
+    <div class="lb-head"><span>Gardener</span><span>Days alive</span></div>
+    <div class="lb lb-anim" id="lbAnim" style="height:${top.length*ROW}px">${rowsHtml}</div>
+    ${youLine}
+    <button class="wide" id="againBtn" style="margin-top:10px">Plant a new seed</button>
+  `);
+  document.getElementById('againBtn').onclick=()=>startRun();
+
+  // start the climb after layout settles
+  const rows=[...document.querySelectorAll('#lbAnim .lb-row')];
+  requestAnimationFrame(()=>requestAnimationFrame(()=>{
+    rows.forEach(el=>{ el.style.top=el.dataset.after+'px'; });
+    const yl=document.querySelector('.youline'); if(yl) yl.style.opacity='1';
+  }));
+  if(meInTop) setTimeout(()=>{ blip(topRank?880:660,.16); if(topRank) celebrate(); }, 850);
+}
+
+function celebrate(){
+  const me=document.querySelector('#lbAnim .lb-row.me');
+  if(me && me.animate) me.animate([{transform:'scale(1)'},{transform:'scale(1.05)'},{transform:'scale(1)'}],{duration:520,easing:'ease-out'});
+  const host=document.getElementById('lbAnim'); if(!host) return;
+  const colors=['#f4b940','#7cc45f','#f4a1ae','#5ca4d6'];
+  for(let i=0;i<18;i++){
+    const s=document.createElement('span');
+    s.style.cssText=`position:absolute;top:-10px;left:${(Math.random()*100).toFixed(1)}%;width:7px;height:7px;border-radius:2px;background:${colors[i%4]};z-index:5;pointer-events:none`;
+    host.appendChild(s);
+    if(s.animate){
+      s.animate([{transform:'translateY(0) rotate(0deg)',opacity:1},
+                 {transform:`translateY(${host.clientHeight+30}px) rotate(${360+Math.random()*360}deg)`,opacity:.15}],
+        {duration:900+Math.random()*700,easing:'cubic-bezier(.35,.2,.5,1)'}).onfinish=()=>s.remove();
+    } else { s.remove(); }
+  }
 }
 
 function ending(secret){
@@ -735,20 +843,23 @@ function ending(secret){
 
 async function screenLeaderboard(){
   S.phase='leaderboard';
-  show(`<h2>Longest lives</h2><div class="lb" id="lbList"><p class="hint">Loading…</p></div>
+  show(`<h2>Longest lives</h2>
+        <div class="lb-head"><span>Gardener</span><span>Days alive</span></div>
+        <div class="lb" id="lbList"><p class="hint">Loading...</p></div>
         <button class="ghost wide" id="backBtn" style="margin-top:12px">Back</button>`);
   document.getElementById('backBtn').onclick=()=> S.day>0 && S.health>0 ? screenPrompt() : screenIntro();
   const data=await fetchScores();
   const list=document.getElementById('lbList');
   if(data && data.length){
     list.innerHTML=data.map((r,i)=>`<div class="lb-row"><span class="rank">${i+1}</span>
-      <span class="nm">${escapeHtml(r.name)}</span><span class="dy">${r.days}d</span></div>`).join('');
+      <span class="nm">${escapeHtml(r.name)}</span><span class="dy">${daysLabel(r.days)}</span></div>`).join('');
   } else {
     const b=bestLocal();
-    list.innerHTML=`<p class="hint">${HAS_SB?'No scores yet. Be the first.':'The global leaderboard turns on once Supabase is connected (see README).'}</p>
-      ${b?`<div class="lb-row"><span class="rank">You</span><span class="nm">${escapeHtml(b.name||'you')}</span><span class="dy">${b.days}d</span></div>`:''}`;
+    list.innerHTML=`<p class="hint">${HAS_SB?'The leaderboard is asleep right now. It wakes once the game gets a little traffic.':'The global leaderboard turns on once Supabase is connected (see README).'}</p>
+      ${b?`<div class="lb-row me"><span class="rank">You</span><span class="nm">${escapeHtml(b.name||'you')}</span><span class="dy">${daysLabel(b.days)}</span></div>`:''}`;
   }
 }
+function daysLabel(n){ return `${n} <span class="u">${n===1?'day':'days'}</span>`; }
 function escapeHtml(s){return (s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
 
 /* footer */
